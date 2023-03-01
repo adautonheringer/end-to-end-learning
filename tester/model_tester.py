@@ -52,17 +52,17 @@ except IndexError:
 # ==============================================================================
 # -- Add PythonAPI for release mode --------------------------------------------
 # ==============================================================================
-try:
-    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + '/carla')
-except IndexError:
-    pass
+# try:
+#     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + '/carla')
+# except IndexError:
+#     pass
 
 import carla
 from carla import ColorConverter as cc
 import cv2
 
-from agents.navigation.behavior_agent import BehaviorAgent  # pylint: disable=import-error
-from agents.navigation.basic_agent import BasicAgent  # pylint: disable=import-error
+import agents.navigation.behavior_agent  # pylint: disable=import-error
+import agents.navigation.basic_agent  # pylint: disable=import-error
 
 
 # ==============================================================================
@@ -97,6 +97,12 @@ class World(object):
         """Constructor method"""
         self._args = args
         self.world = carla_world
+        self.last_location = None
+        self.distance = 0
+        self.distance_in_turn = 0
+        self.distance_for_turn = 0
+        self.missed_turn = False
+        self.missed_turn_location = None
         try:
             self.map = self.world.get_map()
         except RuntimeError as error:
@@ -113,10 +119,16 @@ class World(object):
         self._weather_presets = find_weather_presets()
         self._weather_index = 0
         self._actor_filter = args.filter
-        self.start_location = carla.Location(x=-15.148191, y=69.714005, z=0.600000)
-        self.end_location = carla.Location(x=74.798752, y=28.343533, z=0.600000)
-        # self.start_location = carla.Location(-5.9, -57.9, 1)
-        # self.end_location = carla.Location(-24.6, 70, 1)
+        # Town02 Longer Route
+        self.location_1 = carla.Location(x=-7.530000, y=121.209999, z=0.500000)
+        self.location_2 = carla.Location(x=-7.530004, y=234.110001, z=0.500000)
+        self.location_3 = carla.Location(x=166.914505, y=191.770035, z=0.500000)
+        self.location_4 = carla.Location(x=173.870056, y=105.550011, z=0.500000)
+
+        self.transform_4 = carla.Transform(self.location_4, carla.Rotation(yaw=-180))
+        self.transform_1 = carla.Transform(self.location_1, carla.Rotation(yaw=90))
+        self.transform_2 = carla.Transform(self.location_2, carla.Rotation(yaw=90))
+        self.transform_3 = carla.Transform(self.location_3, carla.Rotation(yaw=0))
         self.restart(args)
         self.world.on_tick(hud.on_world_tick)
         self.recording_enabled = False
@@ -149,12 +161,10 @@ class World(object):
                 print('There are no spawn points available in your map/town.')
                 print('Please add some Vehicle Spawn Point to your UE4 scene.')
                 sys.exit(1)
-            spawn_points = self.map.get_spawn_points()
-            spawn_point = random.choice(spawn_points) if spawn_points else carla.Transform()
-            # self.player = self.world.try_spawn_actor(blueprint, spawn_point)
 
-            transform = carla.Transform(self.start_location, carla.Rotation())
+            transform = self.transform_1
             self.player = self.world.try_spawn_actor(blueprint, transform)
+            self.last_location = transform.location
             self.modify_vehicle_physics(self.player)
 
         if self._args.sync:
@@ -292,6 +302,12 @@ class HUD(object):
         collision = [x / max_col for x in collision]
         vehicles = world.world.get_actors().filter('vehicle.*')
 
+        if world.last_location is not None:
+            current_location = transform.location
+            world.distance += abs(current_location.x - world.last_location.x) + abs(
+                current_location.y - world.last_location.y)
+            world.last_location = current_location
+
         self._info_text = [
             'Server:  % 16.0f FPS' % self.server_fps,
             'Client:  % 16.0f FPS' % clock.get_fps(),
@@ -385,11 +401,6 @@ class HUD(object):
                         else:
                             rect = pygame.Rect((bar_h_offset, v_offset + 8), (fig * bar_width, 6))
                         pygame.draw.rect(display, (255, 255, 255), rect)
-                    ####
-                    if item[0] == 'Throttle:':
-                        display.blit(
-                            self._font_mono.render(f'Throttle: {item[1]}', True, (255, 255, 255)),
-                            (150, v_offset + 16))
 
                     item = item[0]
                 if item:  # At this point has to be a str.
@@ -479,6 +490,8 @@ class CollisionSensor(object):
     def __init__(self, parent_actor, hud):
         """Constructor method"""
         self.sensor = None
+        self.counter = 0
+        self.collision_location = None
         self.history = []
         self._parent = parent_actor
         self.hud = hud
@@ -503,6 +516,11 @@ class CollisionSensor(object):
         self = weak_self()
         if not self:
             return
+        other_actor = self._parent
+        x = int(other_actor.get_location().x)
+        y = int(other_actor.get_location().y)
+        self.collision_location = (x, y)
+        self.counter += 1
         actor_type = get_actor_display_name(event.other_actor)
         self.hud.notification('Collision with %r' % actor_type)
         impulse = event.normal_impulse
@@ -523,6 +541,7 @@ class LaneInvasionSensor(object):
     def __init__(self, parent_actor, hud):
         """Constructor method"""
         self.sensor = None
+        self.counter = 0
         self._parent = parent_actor
         self.hud = hud
         world = self._parent.get_world()
@@ -542,6 +561,7 @@ class LaneInvasionSensor(object):
         lane_types = set(x.type for x in event.crossed_lane_markings)
         text = ['%r' % str(x).split()[-1] for x in lane_types]
         self.hud.notification('Crossed line %s' % ' and '.join(text))
+        self.counter += 1
 
 
 # ==============================================================================
@@ -587,9 +607,10 @@ class CameraManager(object):
 
     def __init__(self, parent_actor, hud):
         """Constructor method"""
-        self.model = load_model('CNN_Models/100_rounds')
+        self.model = load_model(source_dir)
         self.sensor = None
         self.surface = None
+        self.counter = 0
         self._parent = parent_actor
         self.hud = hud
         self.recording = False
@@ -618,7 +639,7 @@ class CameraManager(object):
             if item[0].startswith('sensor.camera'):
                 blp.set_attribute('image_size_x', str(hud.dim[0]))
                 blp.set_attribute('image_size_y', str(hud.dim[1]))
-                blp.set_attribute('sensor_tick', '0.1')
+                blp.set_attribute('sensor_tick', '0.01')
             elif item[0].startswith('sensor.lidar'):
                 blp.set_attribute('range', '50')
             item.append(blp)
@@ -629,8 +650,10 @@ class CameraManager(object):
         self.transform_index = (self.transform_index + 1) % len(self._camera_transforms)
         self.set_sensor(self.index, notify=False, force_respawn=True)
 
-    def set_sensor(self, index, notify=True, force_respawn=False):
+    def set_sensor(self, index, agent: agents.navigation.basic_agent.BasicAgent = None, notify=True,
+                   force_respawn=False, blueprint=None, world: World = None, clock=None):
         """Set a sensor"""
+        # if agent is not None:
         index = index % len(self.sensors)
         needs_respawn = True if self.index is None else (
                 force_respawn or (self.sensors[index][0] != self.sensors[self.index][0]))
@@ -639,7 +662,7 @@ class CameraManager(object):
                 self.sensor.destroy()
                 self.surface = None
             self.sensor = self._parent.get_world().spawn_actor(
-                self.sensors[index][-1],
+                self.sensors[index][-1] if blueprint is None else blueprint,
                 self._camera_transforms[self.transform_index][0],
                 attach_to=self._parent,
                 attachment_type=self._camera_transforms[self.transform_index][1])
@@ -647,7 +670,7 @@ class CameraManager(object):
             # We need to pass the lambda a weak reference to
             # self to avoid circular reference.
             weak_self = weakref.ref(self)
-            self.sensor.listen(lambda image: CameraManager._parse_image(weak_self, image))
+            self.sensor.listen(lambda image: CameraManager._parse_image(weak_self, image, agent, world, clock))
         if notify:
             self.hud.notification(self.sensors[index][2])
         self.index = index
@@ -667,52 +690,91 @@ class CameraManager(object):
             display.blit(self.surface, (0, 0))
 
     @staticmethod
-    def _parse_image(weak_self, image):
-        self = weak_self()
-        array = None
-        if not self:
-            return
-        if self.sensors[self.index][0].startswith('sensor.lidar'):
-            points = np.frombuffer(image.raw_data, dtype=np.dtype('f4'))
-            points = np.reshape(points, (int(points.shape[0] / 4), 4))
-            lidar_data = np.array(points[:, :2])
-            lidar_data *= min(self.hud.dim) / 100.0
-            lidar_data += (0.5 * self.hud.dim[0], 0.5 * self.hud.dim[1])
-            lidar_data = np.fabs(lidar_data)  # pylint: disable=assignment-from-no-return
-            lidar_data = lidar_data.astype(np.int32)
-            lidar_data = np.reshape(lidar_data, (-1, 2))
-            lidar_img_size = (self.hud.dim[0], self.hud.dim[1], 3)
-            lidar_img = np.zeros(lidar_img_size)
-            lidar_img[tuple(lidar_data.T)] = (255, 255, 255)
-            self.surface = pygame.surfarray.make_surface(lidar_img)
-        else:
-            image.convert(self.sensors[self.index][1])
-            array = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
-            array = np.reshape(array, (image.height, image.width, 4))
-            array = array[:, :, :3]
-            array = array[:, :, ::-1]
-            self.surface = pygame.surfarray.make_surface(array.swapaxes(0, 1))
-            resized = cv2.resize(array, dsize=(180, 300))
+    def _parse_image(weak_self, image, agent: agents.navigation.basic_agent.BasicAgent, world: World, clock=None):
+        if agent is not None and world is not None:
+            self = weak_self()
+            self.counter += 1
+            array = None
+            if not self:
+                return
+            if self.sensors[self.index][0].startswith('sensor.lidar'):
+                points = np.frombuffer(image.raw_data, dtype=np.dtype('f4'))
+                points = np.reshape(points, (int(points.shape[0] / 4), 4))
+                lidar_data = np.array(points[:, :2])
+                lidar_data *= min(self.hud.dim) / 100.0
+                lidar_data += (0.5 * self.hud.dim[0], 0.5 * self.hud.dim[1])
+                lidar_data = np.fabs(lidar_data)  # pylint: disable=assignment-from-no-return
+                lidar_data = lidar_data.astype(np.int32)
+                lidar_data = np.reshape(lidar_data, (-1, 2))
+                lidar_img_size = (self.hud.dim[0], self.hud.dim[1], 3)
+                lidar_img = np.zeros(lidar_img_size)
+                lidar_img[tuple(lidar_data.T)] = (255, 255, 255)
+                self.surface = pygame.surfarray.make_surface(lidar_img)
+            else:
+                image.convert(self.sensors[self.index][1])
+                array = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
+                array = np.reshape(array, (-1, image.height, image.width, 4))
+                array = array[:, :, :, :3]
+                array = array[:, :, :, ::-1]
+                # self.surface = pygame.surfarray.make_surface(array.swapaxes(0, 1))
+                # reshaped_image = np.expand_dims(array, axis=0)
 
-            prediction = self.model.predict(resized.reshape(-1, 180, 300, 3))
-            print(prediction)
+                high_level_5 = int(agent.get_local_planner().get_incoming_waypoint_and_direction(5)[1].value)
+                high_level_0 = int(agent.get_local_planner().get_incoming_waypoint_and_direction(0)[1].value)
+                high_level = high_level_0 if high_level_5 - high_level_0 >= 0 else high_level_5
 
-            control = carla.VehicleControl()
-            control.steer = float(prediction[0][2])
-            control.throttle = float(prediction[0][0])
-            control.brake = float(prediction[0][1])
-            # control.throttle = 0.4
-            # control.brake = 0
-            control.manual_gear_shift = False
-            control.hand_brake = False
+                agent.run_step()
+                current_location = self._parent.get_transform().location
 
-            self._parent.apply_control(control)
+                if world.distance_in_turn > 50:
+                    world.missed_turn = True
+                    world.missed_turn_location = (int(current_location.x), int(current_location.y))
 
-        if self.recording:
-            control = self._parent.get_control()
-            label = np.array([control.throttle, control.brake, control.steer])
-            np.savez(f'dataset/%08d' % image.frame, x=array, y=label)
-            image.save_to_disk('_out/%08d' % image.frame)
+                if high_level == 4:
+                    world.distance_in_turn = 0
+                    world.distance_for_turn = world.distance
+                else:
+                    world.distance_in_turn = world.distance - world.distance_for_turn
+
+                vel = self._parent.get_velocity()
+                current_speed = (3.6 * math.sqrt(vel.x ** 2 + vel.y ** 2 + vel.z ** 2))
+                speed_limit = self._parent.get_speed_limit()
+                hlc = np.zeros((6,), dtype='float16')
+                hlc[0] = current_speed
+                hlc[1] = speed_limit
+                if high_level == 1:
+                    hlc[2] = 1
+                elif high_level == 2:
+                    hlc[3] = 1
+                elif high_level == 3:
+                    hlc[4] = 1
+                else:
+                    hlc[5] = 1
+                reshaped_hlc = np.expand_dims(hlc, axis=0)
+
+                prediction = self.model.predict([array, reshaped_hlc], verbose=0)
+
+                steer = float(prediction[0][0])
+                throttle = float(prediction[0][1])
+                brake = float(prediction[0][2])
+
+                control = carla.VehicleControl()
+                control.steer = steer
+                control.throttle = throttle
+                control.brake = 0 if control.throttle > brake else brake
+                control.manual_gear_shift = False
+                control.hand_brake = False
+
+                self._parent.apply_control(control)
+                world.world.tick()
+                # clock.tick()
+                # world.tick(clock)
+
+            if self.recording:
+                control = self._parent.get_control()
+                label = np.array([control.throttle, control.brake, control.steer])
+                np.savez(f'dataset/%08d' % image.frame, x=array, y=label)
+                image.save_to_disk('_out/%08d' % image.frame)
 
 
 # ==============================================================================
@@ -720,7 +782,7 @@ class CameraManager(object):
 # ==============================================================================
 
 
-def game_loop(args):
+def game_loop(args, turn):
     """
     Main loop of the simulation. It handles updating all the HUD information,
     ticking the agent and, if needed, the world.
@@ -729,94 +791,131 @@ def game_loop(args):
     pygame.font.init()
     world = None
 
+    weather_preset = [carla.WeatherParameters.ClearNoon,
+                      carla.WeatherParameters.CloudyNoon,
+                      carla.WeatherParameters.WetNoon,
+                      carla.WeatherParameters.WetCloudyNoon,
+                      carla.WeatherParameters.ClearSunset,
+                      carla.WeatherParameters.CloudySunset,
+                      carla.WeatherParameters.WetSunset,
+                      carla.WeatherParameters.WetCloudySunset]
+
+    str_weather = ['carla.WeatherParameters.ClearNoon',
+                   'carla.WeatherParameters.CloudyNoon',
+                   'carla.WeatherParameters.WetNoon',
+                   'carla.WeatherParameters.WetCloudyNoon',
+                   'carla.WeatherParameters.ClearSunset',
+                   'carla.WeatherParameters.CloudySunset',
+                   'carla.WeatherParameters.WetSunset',
+                   'carla.WeatherParameters.WetCloudySunset']
+
     try:
         if args.seed:
             random.seed(args.seed)
 
         client = carla.Client(args.host, args.port)
-        client.set_timeout(4.0)
+        client.set_timeout(10.0)
+        client.load_world('Town02')
 
-        traffic_manager = client.get_trafficmanager()
+        # traffic_manager = client.get_trafficmanager()
         sim_world = client.get_world()
 
         if args.sync:
-            print('sync mode activated')
             settings = sim_world.get_settings()
             settings.synchronous_mode = True
-            settings.fixed_delta_seconds = 0.05
+            settings.fixed_delta_seconds = 0.1
             sim_world.apply_settings(settings)
+            # traffic_manager.set_synchronous_mode(True)
 
-            traffic_manager.set_synchronous_mode(True)
-
-        display = pygame.display.set_mode(
-            (args.width, args.height),
-            pygame.HWSURFACE | pygame.DOUBLEBUF)
+        # display = pygame.display.set_mode(
+        #     (args.width, args.height),
+        #     pygame.HWSURFACE | pygame.DOUBLEBUF)
 
         hud = HUD(args.width, args.height)
-        world = World(client.get_world(), hud, args)
+        world = World(sim_world, hud, args)
         controller = KeyboardControl(world)
         opt_dict = {"ignore_traffic_lights": True, "ignore_stop_signs": True}
         if args.agent == "Basic":
-            agent = BasicAgent(vehicle=world.player, target_speed=25, opt_dict=opt_dict)
+            agent = agents.navigation.basic_agent.BasicAgent(vehicle=world.player, target_speed=15, opt_dict=opt_dict)
         else:
-            agent = BehaviorAgent(world.player, behavior=args.behavior)
+            agent = agents.navigation.behavior_agent.BehaviorAgent(world.player, behavior=args.behavior)
+
+        spectator = sim_world.get_spectator()
+        transform = carla.Transform(carla.Location(90, 180, 170), carla.Rotation(pitch=-90))
+        spectator.set_transform(transform)
 
         # Set the agent destination
-
-        agent.set_destination(end_location=world.end_location)
-        where_to = world.end_location
+        where_to = world.location_2
+        agent.set_destination(where_to)
 
         clock = pygame.time.Clock()
 
         camera_manager = CameraManager(world.player, hud)
-        # camera_manager.toggle_recording()
-        camera_manager.set_sensor(0)
+        bp_lib = sim_world.get_blueprint_library()
+        front_camera_bp = bp_lib.find('sensor.camera.rgb')
+        front_camera_bp.set_attribute('image_size_x', '300')
+        front_camera_bp.set_attribute('image_size_y', '180')
+        camera_manager.set_sensor(0, agent=agent, blueprint=front_camera_bp, world=world, clock=clock)
 
-        count = 0
+        rand_weather = random.randint(0, 8)
+        turn[4] = str_weather[rand_weather]
+        print(str_weather[rand_weather])
+        sim_world.set_weather(weather_preset[rand_weather])
+
+        world.world.tick()
+
         while True:
             clock.tick()
-            if args.sync:
-                world.world.tick()
-            else:
-                world.world.wait_for_tick()
-            if controller.parse_events():
-                return
+            # if args.sync:
+            #     world.world.tick()
+            # else:
+            #     world.world.wait_for_tick()
+            # if controller.parse_events():
+            #     return
 
             world.tick(clock)
-            world.render(display)
-            pygame.display.flip()
+
+            # world.render(display)
+            # camera_manager.render(display)
+            # pygame.display.flip()
 
             if agent.done():
-                if args.loop:
-                    if count == 5:
-                        print("The target has been reached, stopping the simulation")
-                        break
-                    if where_to == world.end_location:
-                        count += 1
-
-                    where_to = world.start_location if where_to == world.end_location else world.end_location
-                    agent.set_destination(where_to)
-
-                    world.hud.notification("The target has been reached, searching for another target", seconds=4.0)
-                    print("The target has been reached, searching for another target")
+                if where_to == world.location_2:
+                    where_to = world.location_3
+                elif where_to == world.location_3:
+                    where_to = world.location_4
+                elif where_to == world.location_4:
+                    where_to = world.location_1
                 else:
-                    print("The target has been reached, stopping the simulation")
+                    turn[5] = True
+                    camera_manager.sensor.destroy()
                     break
+                agent.set_destination(where_to)
 
-            # control = agent.run_step()
-            # control.manual_gear_shift = False
-            # world.player.apply_control(control)
+            if world.collision_sensor.counter > 0:
+                if camera_manager.sensor is not None:
+                    camera_manager.sensor.destroy()
+                break
 
-            # world.player.set_autopilot(True)
+            if world.missed_turn:
+                if camera_manager.sensor is not None:
+                    camera_manager.sensor.destroy()
+                turn[3] = world.missed_turn_location
+                break
 
     finally:
 
+        turn[0] = world.lane_invasion_sensor.counter
+        turn[1] = int(world.distance)
+        turn[2] = world.collision_sensor.collision_location
+
         if world is not None:
-            settings = world.world.get_settings()
-            settings.synchronous_mode = False
-            settings.fixed_delta_seconds = None
-            world.world.apply_settings(settings)
-            traffic_manager.set_synchronous_mode(True)
+            # camera_manager.sensor.destroy()
+            # settings = world.world.get_settings()
+            # settings.synchronous_mode = False
+            # settings.fixed_delta_seconds = None
+            # world.world.apply_settings(settings)
+            # traffic_manager.set_synchronous_mode(True)
 
             world.destroy()
 
@@ -852,11 +951,11 @@ def main():
     argparser.add_argument(
         '--res',
         metavar='WIDTHxHEIGHT',
-        default='1280x720',
+        default='300x180',
         help='Window resolution (default: 1280x720)')
     argparser.add_argument(
         '--sync',
-        action='store_true',
+        action='store_false',
         help='Synchronous mode execution')
     argparser.add_argument(
         '--filter',
@@ -896,11 +995,26 @@ def main():
     print(__doc__)
 
     try:
-        game_loop(args)
+        game_loop(args, turn)
 
     except KeyboardInterrupt:
         print('\nCancelled by user. Bye!')
 
 
 if __name__ == '__main__':
-    main()
+    amount_of_turns = 100
+
+    source_dir = '../Models/Free_Noise/version_1/weights_improvement_08_0.0130.hdf5'
+    # save_dir = '/home/adauton/Desktop/all_path_noise'
+
+    turns = [[None for j in range(6)] for i in range(amount_of_turns)]
+
+    for i, turn in enumerate(turns):
+        print(f'Starting round {i + 1}')
+        main()
+        # np.save(f'../../Models/Path_Noise/version_1/sim_results/simulator_results_tick_on_camera_{i+200}.npy', turn)
+        for _turn in turns:
+            if _turn[0] is not None:
+                print(_turn)
+
+    # np.save('../../Models/Path_Multicamera/version_1/sim_results/simulator_results_tick_on_camera_1.npy', turns)
