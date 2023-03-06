@@ -762,7 +762,7 @@ class CameraManager(object):
                 label = np.array(
                     [control.steer, control.throttle, control.brake, high_level, current_speed, speed_limit])
                 np.savez(f'dataset/%08d_{position}' % image.frame, x=array, y=label)
-                # image.save_to_disk(f'_out/%08d_{position}' % image.frame)
+                image.save_to_disk(f'_out/%08d_{position}' % image.frame)
 
 
 # ==============================================================================
@@ -840,10 +840,14 @@ def game_loop(args):
         spectator.set_transform(transform)
 
         locations = [world.location_1, world.location_2, world.location_3, world.location_4]
+        commands = ["Straight", "Left", "Right", "Left", "Right", "Left"]
         path_list = []
-        for i in range(50):
+        command_list = []
+        for i in range(100):
             path_list += locations
-        traffic_manager.set_path(world.player, path_list)
+            command_list += commands
+        # traffic_manager.set_path(world.player, path_list)
+        traffic_manager.set_route(world.player, command_list)
 
         clock = pygame.time.Clock()
 

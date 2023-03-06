@@ -898,6 +898,7 @@ def game_loop(args, turn):
                 break
 
             if world.missed_turn:
+                print("missed turn")
                 if camera_manager.sensor is not None:
                     camera_manager.sensor.destroy()
                 turn[3] = world.missed_turn_location
@@ -1004,15 +1005,15 @@ def main():
 if __name__ == '__main__':
     amount_of_turns = 100
 
-    source_dir = '../Models/Free_Noise/version_1/weights_improvement_08_0.0130.hdf5'
-    # save_dir = '/home/adauton/Desktop/all_path_noise'
+    source_dir = '/home/adauton/Documents/Mestrado/Tese/Models/Multicamera_7/version_1/weights_improvement_10_0.0072.hdf5'
+    dest_dir = '/home/adauton/Documents/Mestrado/Tese/Models/Multicamera_7/version_1/simulator_results'
 
     turns = [[None for j in range(6)] for i in range(amount_of_turns)]
 
     for i, turn in enumerate(turns):
         print(f'Starting round {i + 1}')
         main()
-        # np.save(f'../../Models/Path_Noise/version_1/sim_results/simulator_results_tick_on_camera_{i+200}.npy', turn)
+        # np.save(os.path.join(dest_dir, 'simulator_results_tick_on_camera_' + str(i) + '.npy'), turn)
         for _turn in turns:
             if _turn[0] is not None:
                 print(_turn)
